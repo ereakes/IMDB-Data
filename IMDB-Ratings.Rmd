@@ -1,0 +1,204 @@
+---
+title: "IMDB Ratings"
+author: "Ewan"
+date: "2025-03-22"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r, warning = FALSE, message = FALSE}
+# warning = FALSE AND message = FALSE to hide "different version of R" messages
+
+library(tidyverse)
+library(patchwork)
+library(skimr)
+```
+
+```{r}
+# Reading in data downloaded from IMDB ---------------------------
+ratings <- read_tsv("title.ratings.tsv", show_col_types = FALSE)
+episode <- read_tsv("title.episode.tsv", show_col_types = FALSE)
+title <- read_tsv("title.basics.tsv", show_col_types = FALSE)
+crew <- read_tsv("title.crew.tsv", show_col_types = FALSE)
+names <- read_tsv("name.basics.tsv", show_col_types = FALSE)
+```
+
+```{r}
+# Initial validation and data exploration ---------------------------
+summarise(ratings)
+skim(ratings)
+summary(ratings)
+data_list <- list(ratings = ratings, episode = episode, title = title)
+lapply(data_list, head)
+```
+
+```{r}
+## Initial data cleaning
+# Ratings Cleaning ---------------------------
+ratings_clean <- ratings %>%
+  rename(rating = "averageRating", votes = "numVotes") %>%
+  distinct()
+
+# Episode Cleaning ---------------------------
+episode_clean <- episode %>%
+  mutate(
+    episodeNumber = ifelse(episodeNumber == "\\NA", NA, episodeNumber),
+    seasonNumber = ifelse(episodeNumber == "\\NA", NA, seasonNumber),
+    episodeNumber = as.numeric(episodeNumber),
+    seasonNumber = as.numeric(seasonNumber)
+  ) %>%
+  rename(episode = "episodeNumber", season = "seasonNumber") %>%
+  distinct()
+
+# Title Cleaning ---------------------------
+title_clean <- title %>%
+  select(tconst, titleType, primaryTitle, startYear, runtimeMinutes, genres) %>%
+  filter(!(titleType %in% c("videoGame", "video", "short", "tvShort", "tvSpecial", "tvPilot"))) %>%
+  mutate(
+    startYear = ifelse(startYear == "\\N", NA, startYear),
+    runtimeMinutes = ifelse(runtimeMinutes == "\\N", NA, runtimeMinutes),
+    startYear = as.numeric(startYear),
+    runtimeMinutes = as.numeric(runtimeMinutes)
+  ) %>%
+  distinct()
+
+# Saving cleaned datasets as rds for faster loading and removing from environment ---------------------------
+saveRDS(title_clean, "cleaned/title_clean.rds")
+saveRDS(episode_clean, "cleaned/episode_clean.rds")
+saveRDS(ratings_clean, "cleaned/ratings_clean.rds")
+saveRDS(crew, "cleaned/crew_clean.rds")
+saveRDS(names, "cleaned/names.rds")
+
+to_remove <- c("episode_clean", "ratings_clean", "title_clean", "episode", "title", "names", "crew")
+rm(list = to_remove, envir = .GlobalEnv)
+
+# Re-loading datasets ---------------------------
+ratings_clean <- readRDS("cleaned/ratings_clean.rds")
+title_clean <- readRDS("cleaned/title_clean.rds")
+episode_clean <- readRDS("cleaned/episode_clean.rds")
+names <- readRDS("cleaned/names.rds")
+crew <- readRDS("cleaned/crew_clean.rds")
+```
+
+```{r}
+## Subsetting title dataset to Movie and TV ---------------------------
+# Movie
+unique(title_clean$titleType)
+
+title_clean_movie <- title_clean %>%
+  filter(titleType %in% c("movie", "tvMovie")) %>%
+  inner_join(ratings_clean, by = c("tconst")) %>%
+  select(tconst, primaryTitle, startYear, genres, rating, votes, runtimeMinutes) %>%
+  filter(votes >= 5000)
+  
+write_csv(title_clean_movie, "cleaned/title_clean_movie.csv")
+
+# TV ---------------------------
+title_clean_series <- title_clean %>%
+  filter(titleType %in% c("tvSeries", "tvMiniSeries")) %>%
+  select(tconst, titleType, primaryTitle, startYear, genres)
+
+title_clean_episode <- title_clean %>%
+  filter(titleType %in% "tvEpisode")
+```
+
+```{r}
+# Subsetting for PowerBI ---------------------------
+# Genre with ID ---------------------------
+title_genre <- title_clean_movie
+
+title_genre$primaryGenre <- str_split_fixed(title_clean_movie$genres, ",", 2)[, 1]
+
+genre_pbi <- title_genre %>%
+  select(primaryGenre) %>%
+  distinct() %>%
+  mutate(genresID = str_c("G", row_number()))
+
+ratings_pbi <- title_genre %>%
+  select(tconst, primaryGenre, rating, votes, runtimeMinutes) %>%
+  left_join(genre_pbi, by = "primaryGenre") %>%
+  select(-primaryGenre)
+
+# Director with ID ---------------------------
+crew$directors <- str_split_fixed(crew$directors, ",", 2)[, 1]
+
+ratings_pbi <- crew %>%
+  rename(nconst = "directors") %>%
+  select(tconst, nconst) %>%
+  filter(tconst %in% unique(title_genre$tconst)) %>%
+  inner_join(ratings_pbi, by = "tconst")
+
+names_pbi <- names %>%
+  select(nconst, primaryName) %>%
+  filter(nconst %in% unique(ratings_pbi$nconst)) %>%
+  distinct()
+
+# title ---------------------------
+title_pbi <- genre_pbi %>%
+  select(tconst, primaryTitle, startYear)
+
+write_csv(genre_pbi, "dim_genre.csv")
+write_csv(names_pbi, "dim_names.csv")
+write_csv(ratings_pbi, "fac_ratings.csv")
+write_csv(title_pbi, "dim_title.csv")
+```
+
+```{r}
+## TV ---------------------------
+# Creating The Dr Who subset
+drwho_series <- title_clean_series %>%
+  filter(primaryTitle == "Doctor Who", startYear == "2005")
+
+drwho_episodes <- episode_clean %>%
+  filter(parentTconst == drwho_series$tconst)
+
+drwho_episode_ratings <- ratings_clean %>%
+  filter(tconst %in% c(drwho_episodes$tconst)) %>%
+  inner_join(drwho_episodes, by = c("tconst")) %>%
+  select(tconst, rating, season, episode)
+
+write_csv(drwho_episode_ratings, "cleaned/drwho.csv")
+
+# Creating the House MD subset ---------------------------
+house_series <- title_clean_series %>%
+  filter(primaryTitle == "House", startYear == "2004")
+
+house_episodes <- episode_clean %>%
+  filter(parentTconst == house_series$tconst)
+
+house_episode_ratings <- ratings_clean %>%
+  filter(tconst %in% c(house_episodes$tconst)) %>%
+  inner_join(house_episodes, by = c("tconst")) %>%
+  select(tconst, rating, season, episode)
+
+write_csv(house_episode_ratings, "cleaned/house.csv")
+
+# Creating The X-Files subset ---------------------------
+xfiles_series <- title_clean_series %>%
+  filter(primaryTitle == "The X-Files")
+
+xfiles_episodes <- episode_clean %>%
+  filter(parentTconst == xfiles_series$tconst)
+
+xfiles_episode_ratings <- ratings_clean %>%
+  filter(tconst %in% c(xfiles_episodes$tconst)) %>%
+  inner_join(xfiles_episodes, by = c("tconst")) %>%
+  select(tconst, rating, season, episode)
+
+write_csv(xfiles_episode_ratings, "cleaned/xfiles.csv")
+
+# Creating the Walking Dead subset ---------------------------
+walkingDead_series <- title_clean_series %>%
+  filter(primaryTitle == "The Walking Dead")
+
+walkingDead_episodes <- episode_clean %>%
+  filter(parentTconst == walkingDead_series$tconst)
+
+walkingDead_episode_ratings <- ratings_clean %>%
+  filter(tconst %in% c(walkingDead_episodes$tconst)) %>%
+  inner_join(walkingDead_episodes, by = c("tconst")) %>%
+  select(tconst, rating, season, episode)
+
+write_csv(walkingDead_episode_ratings, "cleaned/walkingDead.csv")
+```
